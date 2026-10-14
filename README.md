@@ -112,3 +112,13 @@ Write your answer in your README. It is worth more marks than the feature.
 | `relation "..." does not exist` | Migrations did not run, or the app started before they finished. |
 | Build takes minutes each time | `COPY . .` is above your dependency install. |
 | CI cannot reach the database | In CircleCI service containers the host **is** `localhost` — opposite of compose. |
+## Deployment Workflow
+
+This project uses three deployment branches:
+
+- `main`: QA environment
+- `staging`: Pre-production environment
+- `prod`: Production environment
+
+Changes are introduced through feature branches and pull requests.
+Promotions between environments are performed through pull requests

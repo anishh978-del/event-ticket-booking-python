@@ -213,3 +213,7 @@ def booking(ref: str):
     return {"ref": ref, "event": rows[0]["name"], "starts_at": rows[0]["starts_at"],
             "holder": rows[0]["holder"], "seats": [r["seat"] for r in rows],
             "total": round(sum(float(r["price"]) for r in rows), 2)}
+if not holder:
+    raise HTTPException(400, "holder is required")
+if len(holder) > 100:
+    raise HTTPException(400, "holder must be 100 characters or fewer")
