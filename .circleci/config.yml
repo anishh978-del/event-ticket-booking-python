@@ -1,0 +1,191 @@
+
+version: 2.1
+
+jobs:
+  lint:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - checkout
+      - run:
+          name: Install lint tools
+          command: python -m pip install -r requirements-dev.txt
+      - run:
+          name: Check code style
+          command: ruff check app tests
+
+  unit-tests:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+            python -m pip install -r requirements.txt
+            python -m pip install -r requirements-dev.txt
+      - run:
+          name: Run unit tests with coverage
+          command: |
+            export PYTHONPATH="$PWD"
+            python -m pytest tests/test_seats.py \
+              --cov=app.seats \
+              --cov-fail-under=70 \
+              --cov-report=term-missing
+
+  integration-tests:
+    docker:
+      - image: cimg/python:3.12
+        environment:
+          DATABASE_URL: postgres://assigner:assigner@localhost:5432/assigner
+          REDIS_URL: redis://localhost:6379
+      - image: postgres:16-alpine
+        environment:
+          POSTGRES_USER: assigner
+          POSTGRES_PASSWORD: assigner
+          POSTGRES_DB: assigner
+      - image: redis:7-alpine
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies and service clients
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client redis-tools
+            python -m pip install -r requirements.txt
+            python -m pip install -r requirements-dev.txt
+      - run:
+          name: Wait for PostgreSQL and Redis
+          command: |
+            for i in $(seq 1 60); do
+              if pg_isready -h localhost -p 5432 -U assigner -d assigner \
+                 && redis-cli -h localhost -p 6379 ping | grep -q PONG; then
+                echo "PostgreSQL and Redis are ready"
+                break
+              fi
+              if [ "$i" -eq 60 ]; then
+                echo "Services did not become ready"
+                exit 1
+              fi
+              sleep 2
+            done
+      - run:
+          name: Apply database migrations and seed data
+          command: |
+            export PGHOST=localhost
+            export PGPORT=5432
+            export PGUSER=assigner
+            export PGPASSWORD=assigner
+            export PGDATABASE=assigner
+            psql -v ON_ERROR_STOP=1 -f migrations/001_schema.sql
+            psql -v ON_ERROR_STOP=1 -f migrations/002_seed.sql
+      - run:
+          name: Run integration tests
+          command: |
+            export PYTHONPATH="$PWD"
+            python -m pytest tests/test_integration.py -v
+
+  secret-scan:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - run:
+          name: Install Gitleaks
+          command: |
+            curl -fsSL \
+              https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz \
+              -o /tmp/gitleaks.tar.gz
+            mkdir -p /tmp/gitleaks
+            tar -xzf /tmp/gitleaks.tar.gz -C /tmp/gitleaks
+            sudo install /tmp/gitleaks/gitleaks /usr/local/bin/gitleaks
+      - run:
+          name: Scan repository for secrets
+          command: gitleaks dir . --redact --exit-code 1
+
+  docker-publish:
+    parameters:
+      moving_tag:
+        type: string
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build and publish Docker image
+          command: |
+            set -eu
+
+            : "${DOCKERHUB_USER:?Set DOCKERHUB_USER in CircleCI}"
+            : "${DOCKERHUB_TOKEN:?Set DOCKERHUB_TOKEN in CircleCI}"
+
+            IMAGE="${DOCKERHUB_USER}/event-ticket-booking-python"
+            MOVING_TAG="<< parameters.moving_tag >>"
+            SHORT_SHA="$(printf '%s' "$CIRCLE_SHA1" | cut -c1-7)"
+            IMMUTABLE_TAG="${CIRCLE_BRANCH}-${SHORT_SHA}"
+
+            echo "$DOCKERHUB_TOKEN" | docker login \
+              --username "$DOCKERHUB_USER" \
+              --password-stdin
+
+            docker build \
+              -t "${IMAGE}:${MOVING_TAG}" \
+              -t "${IMAGE}:${IMMUTABLE_TAG}" .
+
+            docker push "${IMAGE}:${MOVING_TAG}"
+            docker push "${IMAGE}:${IMMUTABLE_TAG}"
+
+            docker logout
+
+workflows:
+  qa-pipeline:
+    jobs:
+      - lint:
+          filters:
+            branches:
+              only: main
+      - unit-tests:
+          requires:
+            - lint
+          filters:
+            branches:
+              only: main
+      - integration-tests:
+          requires:
+            - unit-tests
+          filters:
+            branches:
+              only: main
+      - secret-scan:
+          requires:
+            - integration-tests
+          filters:
+            branches:
+              only: main
+      - docker-publish:
+          name: publish-qa
+          moving_tag: qa
+          requires:
+            - secret-scan
+          filters:
+            branches:
+              only: main
+
+  staging-pipeline:
+    jobs:
+      - docker-publish:
+          name: publish-stage
+          moving_tag: stage
+          filters:
+            branches:
+              only: staging
+
+  production-pipeline:
+    jobs:
+      - docker-publish:
+          name: publish-prod
+          moving_tag: prod
+          filters:
+            branches:
+              only: prod
