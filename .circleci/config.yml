@@ -141,33 +141,37 @@ jobs:
 workflows:
   qa-pipeline:
     jobs:
-      - lint:
+      - secret-scan:
           filters:
             branches:
               only: main
+
+      - lint:
+          requires:
+            - secret-scan
+          filters:
+            branches:
+              only: main
+
       - unit-tests:
           requires:
             - lint
           filters:
             branches:
               only: main
+
       - integration-tests:
           requires:
             - unit-tests
           filters:
             branches:
               only: main
-      - secret-scan:
-          requires:
-            - integration-tests
-          filters:
-            branches:
-              only: main
+
       - docker-publish:
           name: publish-qa
           moving_tag: qa
           requires:
-            - secret-scan
+            - integration-tests
           filters:
             branches:
               only: main
